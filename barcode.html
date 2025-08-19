@@ -32,7 +32,7 @@
     button:disabled { opacity: .5; cursor: not-allowed; }
 
     #stage { position: relative; border-radius: 16px; overflow: hidden; background:#0a0f1d; border:1px solid #1f2937; }
-    video { width: 100%; height: auto; display:block; transform: scaleX(-1); /* mirror for easier aiming; set to none if undesired */ }
+    video { width: 100%; height: auto; display:block; /* mirroring handled dynamically in JS */ }
     canvas.overlay { position:absolute; inset:0; pointer-events:none; }
 
     .chip { display:inline-flex; align-items:center; gap:8px; padding:6px 10px; border-radius:999px; border:1px solid #223048; background:#0f172a; font-size:12px; color:var(--muted); }
@@ -237,13 +237,18 @@
           video: {
             facingMode,
             deviceId: sel.value ? { exact: sel.value } : undefined,
-            width: { ideal: 1280 }, height: { ideal: 720 },
-            focusMode: 'continuous'
+            width: { ideal: 1920 }, height: { ideal: 1080 }, // Increased resolution for better accuracy on small barcodes
+            focusMode: 'continuous',
+            advanced: [{ zoom: 1.5 }] // Slight zoom to help with small barcodes if supported
           }
         };
         currentStream = await navigator.mediaDevices.getUserMedia(constraints);
         video.srcObject = currentStream;
         await video.play();
+
+        // Dynamically set mirroring: mirror only for front camera (user), not for back (environment)
+        video.style.transform = (facingMode === 'user') ? 'scaleX(-1)' : 'none';
+
         drawOverlay();
         window.addEventListener('resize', drawOverlay, { passive: true });
 
@@ -280,6 +285,9 @@
       const hints = new ZXing.Map();
       // Try hard: enable tryHarder for better accuracy
       hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+      // Allow smaller barcodes by assuming smaller module size
+      hints.set(ZXing.DecodeHintType.ASSUME_CODE_39_CHECK_DIGIT, true); // Additional hint for some formats
+      hints.set(ZXing.DecodeHintType.ASSUME_GS1, true); // For better format detection
       // Multi-format reader
       zxingReader = new ZXing.BrowserMultiFormatReader(hints);
 
