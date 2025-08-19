@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>Live Barcode Scanner — Mobile</title>
+  <style>
+    :root {
+      --bg: #0b1220;
+      --fg: #e7ecf3;
+      --muted: #9fb0c3;
+      --accent: #5dd3ff;
+      --good: #22c55e;
+      --bad: #ef4444;
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--fg); }
+    header { padding: 14px 16px; display:flex; align-items:center; gap:10px; border-bottom: 1px solid #1f2937; position: sticky; top:0; backdrop-filter: blur(6px); background: rgba(11,18,32,0.75); z-index: 10; }
+    header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+
+    .wrap { max-width: 960px; margin: 0 auto; padding: 16px; }
+
+    .controls { display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-bottom: 12px; }
+    .controls > * { width: 100%; }
+
+    select, button, input[type="text"] { 
+      background:#0f172a; color:var(--fg); border:1px solid #24324a; border-radius: 12px; padding: 10px 12px; font-size: 14px; 
+      outline: none; transition: .2s border-color;
+    }
+    button { cursor: pointer; }
+    button.primary { border-color: #3b82f6; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+
+    #stage { position: relative; border-radius: 16px; overflow: hidden; background:#0a0f1d; border:1px solid #1f2937; }
+    video { width: 100%; height: auto; display:block; transform: scaleX(-1); /* mirror for easier aiming; set to none if undesired */ }
+    canvas.overlay { position:absolute; inset:0; pointer-events:none; }
+
+    .chip { display:inline-flex; align-items:center; gap:8px; padding:6px 10px; border-radius:999px; border:1px solid #223048; background:#0f172a; font-size:12px; color:var(--muted); }
+    .row { display:flex; gap:10px; align-items:center; flex-wrap: wrap; }
+
+    .results { margin-top: 14px; display:grid; gap:8px; }
+    .result { border:1px solid #1f2937; background:#0f172a; border-radius: 12px; padding: 10px 12px; display:flex; justify-content:space-between; align-items:center; gap:12px; }
+    .result .fmt { font-size: 12px; color: var(--muted); }
+    .result .val { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; }
+
+    .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+    .ok    { color: var(--good); }
+    .warn  { color: var(--bad); }
+
+    footer { padding: 24px 16px; color: #a2b0c3; font-size: 12px; text-align:center; opacity:.8; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>📷 Live Barcode Scanner</h1>
+    <span class="chip" id="status">idle</span>
+  </header>
+
+  <div class="wrap">
+    <div class="controls">
+      <select id="cameraSelect" title="Choose camera"></select>
+      <div class="row">
+        <button id="startBtn" class="primary">Start</button>
+        <button id="stopBtn" disabled>Stop</button>
+        <button id="torchBtn" disabled>🔦 Torch</button>
+        <button id="flipBtn">Flip</button>
+      </div>
+    </div>
+
+    <div id="stage">
+      <video id="video" playsinline muted></video>
+      <canvas class="overlay" id="overlay"></canvas>
+    </div>
+
+    <div class="hint">Tip: put the barcode fully inside the box. Works on phones. Requires HTTPS for camera access.</div>
+
+    <div class="results" id="results"></div>
+  </div>
+
+  <footer>
+    Powered by <code>BarcodeDetector</code> when available, with ZXing fallback for wide compatibility. Supports Code-128/39, EAN/UPC, QR, DataMatrix, PDF417, Aztec, ITF, Codabar.
+  </footer>
+
+  <!-- ZXing fallback (UMD) -->
+  <!-- <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0/umd/index.min.js"></script> -->
+  <script src="https://unpkg.com/@zxing/library@0.20.0/umd/index.min.js"></script>
+
+  <script>
+  (function(){
+    const codeReader = new ZXing.BrowserMultiFormatReader();
+    const el = (id) => document.getElementById(id);
+    const video = el('video');
+    const overlay = el('overlay');
+    const octx = overlay.getContext('2d');
+    const statusChip = el('status');
+    const sel = el('cameraSelect');
+    const startBtn = el('startBtn');
+    const stopBtn = el('stopBtn');
+    const torchBtn = el('torchBtn');
+    const flipBtn = el('flipBtn');
+    const results = el('results');
+
+    let usingBarcodeDetector = 'BarcodeDetector' in window;
+    let detector = null;
+
+    // ZXing fallback
+    let zxingReader = null; // BrowserMultiFormatReader
+    let currentStream = null;
+    let currentDeviceId = null;
+    let facingMode = 'environment'; // toggle with flip
+
+    let rafId = null;
+    let torchOn = false;
+
+    const supportedFormats = [
+      'aztec','code_128','code_39','code_93','codabar','data_matrix','ean_13','ean_8','itf','pdf417','qr_code','upc_a','upc_e'
+    ];
+
+    async function listCameras(){
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const cams = devices.filter(d => d.kind === 'videoinput');
+        sel.innerHTML = '';
+        cams.forEach((c, i) => {
+          const opt = document.createElement('option');
+          opt.value = c.deviceId;
+          opt.textContent = c.label || `Camera ${i+1}`;
+          sel.appendChild(opt);
+        });
+        // Prefer back camera if available
+        const back = cams.find(c => /back|rear|environment/i.test(c.label));
+        if(back) sel.value = back.deviceId;
+        return cams;
+      } catch(e) {
+        console.error(e);
+      }
+    }
+
+    function setStatus(text, ok){
+      statusChip.textContent = text;
+      statusChip.style.color = ok ? 'var(--good)' : 'var(--muted)';
+    }
+
+    function drawOverlay(){
+      if(!video.videoWidth) return;
+      overlay.width = video.clientWidth;
+      overlay.height = video.clientHeight;
+      const w = overlay.width, h = overlay.height;
+      octx.clearRect(0,0,w,h);
+
+      // Letterbox safe area
+      const margin = Math.round(Math.min(w,h) * 0.08);
+      const boxW = w - margin*2;
+      const boxH = h - margin*2;
+
+      // Scan guide rectangle
+      octx.lineWidth = 2;
+      octx.strokeStyle = 'rgba(93,211,255,.9)';
+      octx.setLineDash([8,6]);
+      octx.strokeRect(margin, margin, boxW, boxH);
+
+      // Corner accents
+      octx.setLineDash([]);
+      const L = 28;
+      octx.lineWidth = 4;
+      octx.beginPath();
+      // TL
+      octx.moveTo(margin, margin+L); octx.lineTo(margin, margin);
+      octx.lineTo(margin+L, margin);
+      // TR
+      octx.moveTo(w-margin-L, margin); octx.lineTo(w-margin, margin);
+      octx.lineTo(w-margin, margin+L);
+      // BR
+      octx.moveTo(w-margin, h-margin-L); octx.lineTo(w-margin, h-margin);
+      octx.lineTo(w-margin-L, h-margin);
+      // BL
+      octx.moveTo(margin+L, h-margin); octx.lineTo(margin, h-margin);
+      octx.lineTo(margin, h-margin-L);
+      octx.stroke();
+    }
+
+    function addResult({format, rawValue}){
+      const row = document.createElement('div');
+      row.className = 'result';
+      const left = document.createElement('div');
+      left.innerHTML = `<div class="fmt">${format}</div><div class="val">${rawValue}</div>`;
+      const copyBtn = document.createElement('button');
+      copyBtn.textContent = 'Copy';
+      copyBtn.addEventListener('click', async () => {
+        try { await navigator.clipboard.writeText(rawValue); copyBtn.textContent = 'Copied!'; setTimeout(()=>copyBtn.textContent='Copy', 1200);} catch{}
+      });
+      row.appendChild(left);
+      row.appendChild(copyBtn);
+      results.prepend(row);
+      if(navigator.vibrate) navigator.vibrate(60);
+      try { new AudioContext().close(); } catch {}
+    }
+
+    function stopStream(){
+      if(currentStream){
+        currentStream.getTracks().forEach(t => t.stop());
+        currentStream = null;
+      }
+      if(zxingReader){
+        try { zxingReader.reset(); } catch {}
+      }
+      if(rafId) cancelAnimationFrame(rafId);
+      torchOn = false; torchBtn.disabled = true; torchBtn.textContent = '🔦 Torch';
+      stopBtn.disabled = true; startBtn.disabled = false;
+      setStatus('stopped');
+    }
+
+    async function applyTorch(on){
+      if(!currentStream) return;
+      const track = currentStream.getVideoTracks()[0];
+      const caps = track.getCapabilities?.();
+      if(caps && caps.torch){
+        try { await track.applyConstraints({ advanced: [{ torch: on }] }); torchOn = on; torchBtn.textContent = on ? '🔦 Torch ON' : '🔦 Torch'; }
+        catch(e){ console.warn('Torch not available', e); }
+      }
+    }
+
+    torchBtn.addEventListener('click', ()=> applyTorch(!torchOn));
+
+    flipBtn.addEventListener('click', async ()=>{
+      facingMode = (facingMode === 'environment') ? 'user' : 'environment';
+      await start();
+    });
+
+    async function start(){
+      try {
+        stopStream();
+        setStatus('starting…');
+
+        const constraints = {
+          audio: false,
+          video: {
+            facingMode,
+            deviceId: sel.value ? { exact: sel.value } : undefined,
+            width: { ideal: 1280 }, height: { ideal: 720 },
+            focusMode: 'continuous'
+          }
+        };
+        currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+        video.srcObject = currentStream;
+        await video.play();
+        drawOverlay();
+        window.addEventListener('resize', drawOverlay, { passive: true });
+
+        // enable torch if supported
+        const track = currentStream.getVideoTracks()[0];
+        const caps = track.getCapabilities?.();
+        if(caps && caps.torch) torchBtn.disabled = false; else torchBtn.disabled = true;
+
+        stopBtn.disabled = false; startBtn.disabled = true;
+
+        // Prefer native BarcodeDetector for speed, otherwise ZXing
+        if(usingBarcodeDetector){
+          try { detector = new BarcodeDetector({ formats: supportedFormats.filter(Boolean) }); }
+          catch(err){ console.warn('BarcodeDetector limited; falling back to ZXing', err); usingBarcodeDetector = false; }
+        }
+
+        if(usingBarcodeDetector){
+          setStatus('scanning (native)…', true);
+          scanWithBarcodeDetector();
+        } else {
+          setStatus('scanning (ZXing)…', true);
+          await scanWithZXing();
+        }
+      } catch(err){
+        console.error(err);
+        setStatus('camera error', false);
+        alert('Camera error: ' + err.message + '\nMake sure you are on HTTPS and allowed camera access.');
+        stopStream();
+      }
+    }
+
+    async function scanWithZXing(){
+      // ZXing UMD namespace is global "ZXing"
+      const hints = new ZXing.Map();
+      // Try hard: enable tryHarder for better accuracy
+      hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+      // Multi-format reader
+      zxingReader = new ZXing.BrowserMultiFormatReader(hints);
+
+      await zxingReader.decodeFromVideoDevice(sel.value || null, video, (result, err, controls) => {
+        if(result){
+          const fmt = result.getBarcodeFormat?.() || result.format || 'unknown';
+          const text = result.getText?.() || result.text || '';
+          addResult({ format: String(fmt), rawValue: text });
+          // Briefly show green border
+          flashOverlay('#22c55e');
+        }
+        // errors are expected when no code in frame; ignore
+      });
+    }
+
+    function flashOverlay(color){
+      if(!overlay.width) return;
+      octx.save();
+      octx.strokeStyle = color; octx.lineWidth = 6;
+      octx.strokeRect(6,6, overlay.width-12, overlay.height-12);
+      setTimeout(()=>{ drawOverlay(); octx.restore(); }, 120);
+    }
+
+    async function scanWithBarcodeDetector(){
+      const process = async () => {
+        if(video.readyState < 2){ rafId = requestAnimationFrame(process); return; }
+        try {
+          const boxes = await detector.detect(video);
+          drawOverlay();
+          boxes.forEach(b => {
+            // draw box
+            octx.lineWidth = 3; octx.strokeStyle = 'rgba(34,197,94,.9)';
+            const { x, y, width, height } = b.boundingBox;
+            // Note: on mirrored video, the x-axis is flipped visually; this is just a hint box
+            octx.strokeRect(x, y, width, height);
+            if(b.rawValue){
+              addResult({ format: b.format || 'detected', rawValue: b.rawValue });
+              flashOverlay('#22c55e');
+            }
+          });
+        } catch (e){ /* ignore */ }
+        rafId = requestAnimationFrame(process);
+      };
+      process();
+    }
+
+    startBtn.addEventListener('click', start);
+    stopBtn.addEventListener('click', stopStream);
+
+    // Populate camera list after a quick, silent probe
+    (async () => {
+      try {
+        // Request a tiny stream once to unlock labels on iOS/Android
+        const probe = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        probe.getTracks().forEach(t => t.stop());
+      } catch {}
+      await listCameras();
+      setStatus('ready');
+    })();
+
+    // Rerender overlay when video metadata known
+    video.addEventListener('loadedmetadata', drawOverlay);
+
+    // Change camera selection live
+    sel.addEventListener('change', () => { currentDeviceId = sel.value; start(); });
+
+    // PWA-ish: prevent screen sleep on some browsers
+    document.addEventListener('visibilitychange', () => { if(document.visibilityState === 'hidden') stopStream(); });
+
+  })();
+  </script>
+</body>
+</html>
