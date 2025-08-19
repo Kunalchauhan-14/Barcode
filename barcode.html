@@ -32,7 +32,7 @@
     button:disabled { opacity: .5; cursor: not-allowed; }
 
     #stage { position: relative; border-radius: 16px; overflow: hidden; background:#0a0f1d; border:1px solid #1f2937; }
-    video { width: 100%; height: auto; display:block; /* mirroring handled dynamically in JS */ }
+    video { width: 100%; height: auto; display:block; } /* Removed static transform */
     canvas.overlay { position:absolute; inset:0; pointer-events:none; }
 
     .chip { display:inline-flex; align-items:center; gap:8px; padding:6px 10px; border-radius:999px; border:1px solid #223048; background:#0f172a; font-size:12px; color:var(--muted); }
@@ -81,8 +81,6 @@
     Powered by <code>BarcodeDetector</code> when available, with ZXing fallback for wide compatibility. Supports Code-128/39, EAN/UPC, QR, DataMatrix, PDF417, Aztec, ITF, Codabar.
   </footer>
 
-  <!-- ZXing fallback (UMD) -->
-  <!-- <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0/umd/index.min.js"></script> -->
   <script src="https://unpkg.com/@zxing/library@0.20.0/umd/index.min.js"></script>
 
   <script>
@@ -104,10 +102,10 @@
     let detector = null;
 
     // ZXing fallback
-    let zxingReader = null; // BrowserMultiFormatReader
+    let zxingReader = null;
     let currentStream = null;
     let currentDeviceId = null;
-    let facingMode = 'environment'; // toggle with flip
+    let facingMode = 'environment'; // Start with back camera
 
     let rafId = null;
     let torchOn = false;
@@ -132,7 +130,7 @@
         if(back) sel.value = back.deviceId;
         return cams;
       } catch(e) {
-        console.error(e);
+        console.error('Camera enumeration error:', e);
       }
     }
 
@@ -164,16 +162,12 @@
       const L = 28;
       octx.lineWidth = 4;
       octx.beginPath();
-      // TL
       octx.moveTo(margin, margin+L); octx.lineTo(margin, margin);
       octx.lineTo(margin+L, margin);
-      // TR
       octx.moveTo(w-margin-L, margin); octx.lineTo(w-margin, margin);
       octx.lineTo(w-margin, margin+L);
-      // BR
       octx.moveTo(w-margin, h-margin-L); octx.lineTo(w-margin, h-margin);
       octx.lineTo(w-margin-L, h-margin);
-      // BL
       octx.moveTo(margin+L, h-margin); octx.lineTo(margin, h-margin);
       octx.lineTo(margin, h-margin-L);
       octx.stroke();
@@ -207,6 +201,7 @@
       if(rafId) cancelAnimationFrame(rafId);
       torchOn = false; torchBtn.disabled = true; torchBtn.textContent = '🔦 Torch';
       stopBtn.disabled = true; startBtn.disabled = false;
+      video.style.transform = 'none'; // Reset transform when stopping
       setStatus('stopped');
     }
 
@@ -216,7 +211,7 @@
       const caps = track.getCapabilities?.();
       if(caps && caps.torch){
         try { await track.applyConstraints({ advanced: [{ torch: on }] }); torchOn = on; torchBtn.textContent = on ? '🔦 Torch ON' : '🔦 Torch'; }
-        catch(e){ console.warn('Torch not available', e); }
+        catch(e){ console.warn('Torch not available:', e); }
       }
     }
 
@@ -224,6 +219,7 @@
 
     flipBtn.addEventListener('click', async ()=>{
       facingMode = (facingMode === 'environment') ? 'user' : 'environment';
+      console.log('Flipped to facingMode:', facingMode);
       await start();
     });
 
@@ -237,24 +233,28 @@
           video: {
             facingMode,
             deviceId: sel.value ? { exact: sel.value } : undefined,
-            width: { ideal: 1920 }, height: { ideal: 1080 }, // Increased resolution for better accuracy on small barcodes
+            width: { ideal: 1920 }, // High resolution for small barcodes
+            height: { ideal: 1080 },
             focusMode: 'continuous',
-            advanced: [{ zoom: 1.5 }] // Slight zoom to help with small barcodes if supported
+            advanced: [{ zoom: 1.5 }] // Slight zoom for better small barcode detection
           }
         };
+        console.log('Applying constraints:', constraints);
         currentStream = await navigator.mediaDevices.getUserMedia(constraints);
         video.srcObject = currentStream;
         await video.play();
 
-        // Dynamically set mirroring: mirror only for front camera (user), not for back (environment)
+        // Set mirroring: front camera (user) mirrors, back camera (environment) does not
         video.style.transform = (facingMode === 'user') ? 'scaleX(-1)' : 'none';
+        console.log('Video transform set to:', video.style.transform);
 
         drawOverlay();
         window.addEventListener('resize', drawOverlay, { passive: true });
 
-        // enable torch if supported
+        // Enable torch if supported
         const track = currentStream.getVideoTracks()[0];
         const caps = track.getCapabilities?.();
+        console.log('Camera capabilities:', caps);
         if(caps && caps.torch) torchBtn.disabled = false; else torchBtn.disabled = true;
 
         stopBtn.disabled = false; startBtn.disabled = true;
@@ -262,7 +262,7 @@
         // Prefer native BarcodeDetector for speed, otherwise ZXing
         if(usingBarcodeDetector){
           try { detector = new BarcodeDetector({ formats: supportedFormats.filter(Boolean) }); }
-          catch(err){ console.warn('BarcodeDetector limited; falling back to ZXing', err); usingBarcodeDetector = false; }
+          catch(err){ console.warn('BarcodeDetector limited; falling back to ZXing:', err); usingBarcodeDetector = false; }
         }
 
         if(usingBarcodeDetector){
@@ -273,7 +273,7 @@
           await scanWithZXing();
         }
       } catch(err){
-        console.error(err);
+        console.error('Start error:', err);
         setStatus('camera error', false);
         alert('Camera error: ' + err.message + '\nMake sure you are on HTTPS and allowed camera access.');
         stopStream();
@@ -281,25 +281,22 @@
     }
 
     async function scanWithZXing(){
-      // ZXing UMD namespace is global "ZXing"
       const hints = new ZXing.Map();
-      // Try hard: enable tryHarder for better accuracy
-      hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-      // Allow smaller barcodes by assuming smaller module size
-      hints.set(ZXing.DecodeHintType.ASSUME_CODE_39_CHECK_DIGIT, true); // Additional hint for some formats
-      hints.set(ZXing.DecodeHintType.ASSUME_GS1, true); // For better format detection
-      // Multi-format reader
+      hints.set(ZXing.DecodeHintType.TRY_HARDER, true); // Improve detection for small barcodes
+      hints.set(ZXing.DecodeHintType.ASSUME_CODE_39_CHECK_DIGIT, true);
+      hints.set(ZXing.DecodeHintType.ASSUME_GS1, true);
+      hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, supportedFormats); // Explicitly set formats
       zxingReader = new ZXing.BrowserMultiFormatReader(hints);
 
       await zxingReader.decodeFromVideoDevice(sel.value || null, video, (result, err, controls) => {
         if(result){
           const fmt = result.getBarcodeFormat?.() || result.format || 'unknown';
           const text = result.getText?.() || result.text || '';
+          console.log('ZXing detected:', { format: fmt, text });
           addResult({ format: String(fmt), rawValue: text });
-          // Briefly show green border
           flashOverlay('#22c55e');
         }
-        // errors are expected when no code in frame; ignore
+        // Errors are expected when no code in frame; ignore
       });
     }
 
@@ -318,12 +315,11 @@
           const boxes = await detector.detect(video);
           drawOverlay();
           boxes.forEach(b => {
-            // draw box
             octx.lineWidth = 3; octx.strokeStyle = 'rgba(34,197,94,.9)';
             const { x, y, width, height } = b.boundingBox;
-            // Note: on mirrored video, the x-axis is flipped visually; this is just a hint box
             octx.strokeRect(x, y, width, height);
             if(b.rawValue){
+              console.log('BarcodeDetector detected:', { format: b.format, rawValue: b.rawValue });
               addResult({ format: b.format || 'detected', rawValue: b.rawValue });
               flashOverlay('#22c55e');
             }
@@ -340,7 +336,6 @@
     // Populate camera list after a quick, silent probe
     (async () => {
       try {
-        // Request a tiny stream once to unlock labels on iOS/Android
         const probe = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
         probe.getTracks().forEach(t => t.stop());
       } catch {}
@@ -348,15 +343,9 @@
       setStatus('ready');
     })();
 
-    // Rerender overlay when video metadata known
     video.addEventListener('loadedmetadata', drawOverlay);
-
-    // Change camera selection live
     sel.addEventListener('change', () => { currentDeviceId = sel.value; start(); });
-
-    // PWA-ish: prevent screen sleep on some browsers
     document.addEventListener('visibilitychange', () => { if(document.visibilityState === 'hidden') stopStream(); });
-
   })();
   </script>
 </body>
