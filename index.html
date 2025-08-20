@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Native Barcode Scanner</title>
+  <style>
+    body { font-family: Arial, sans-serif; text-align: center; margin: 0; padding: 0; background: #f4f4f4; }
+    video { width: 90%; max-width: 500px; margin-top: 20px; border: 2px solid #333; border-radius: 8px; }
+    #result { margin-top: 15px; font-size: 18px; font-weight: bold; color: green; }
+  </style>
+</head>
+<body>
+  <h2>📷 Native Barcode Scanner</h2>
+  <video id="video" autoplay muted playsinline></video>
+  <div id="result">Show a barcode in front of the camera</div>
+
+  <script>
+    // Check if BarcodeDetector API exists
+    if ('BarcodeDetector' in window) {
+      const formats = ['code_128', 'qr_code', 'ean_13', 'upc_e', 'codabar']; // add more if needed
+      const detector = new BarcodeDetector({ formats });
+
+      const video = document.getElementById('video');
+      const result = document.getElementById('result');
+
+      // Start camera
+      navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment' } // back camera on phone
+      }).then(stream => {
+        video.srcObject = stream;
+        video.play();
+
+        // Scan loop
+        const scan = async () => {
+          try {
+            const barcodes = await detector.detect(video);
+            if (barcodes.length > 0) {
+              result.textContent = "✅ Detected: " + barcodes[0].rawValue;
+              console.log("Detected:", barcodes);
+            }
+          } catch (err) {
+            console.error("Detection failed:", err);
+          }
+          requestAnimationFrame(scan);
+        };
+        scan();
+      }).catch(err => {
+        console.error("Camera error:", err);
+        result.textContent = "❌ Camera access denied";
+      });
+
+    } else {
+      document.getElementById('result').textContent =
+        "❌ BarcodeDetector API not supported on this browser.";
+    }
+  </script>
+</body>
+</html>
